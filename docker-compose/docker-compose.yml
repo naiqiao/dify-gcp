@@ -1,0 +1,188 @@
+version: '3.8'
+
+services:
+  # Dify API Backend
+  api:
+    image: langgenius/dify-api:${DIFY_VERSION:-latest}
+    restart: always
+    environment:
+      - MODE=api
+      - LOG_LEVEL=INFO
+      - DEBUG=false
+      - SECRET_KEY=${SECRET_KEY}
+      
+      # Database Configuration
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=cloud-sql-proxy
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE}
+      
+      # Redis Configuration
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      
+      # Celery Configuration
+      - CELERY_BROKER_URL=redis://${REDIS_HOST}:${REDIS_PORT:-6379}/${REDIS_DB:-0}
+      
+      # Storage Configuration
+      - STORAGE_TYPE=${STORAGE_TYPE}
+      - GOOGLE_STORAGE_BUCKET_NAME=${GOOGLE_STORAGE_BUCKET_NAME}
+      
+      # Web Configuration
+      - WEB_API_CORS_ALLOW_ORIGINS=*
+      - CONSOLE_CORS_ALLOW_ORIGINS=*
+      - CONSOLE_WEB_URL=https://${DOMAIN}
+      - WEB_API_URL=https://${DOMAIN}
+      
+      # Mail Configuration (optional)
+      - MAIL_TYPE=${MAIL_TYPE:-}
+      - MAIL_DEFAULT_SEND_FROM=${MAIL_DEFAULT_SEND_FROM:-}
+      - SMTP_SERVER=${SMTP_SERVER:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      
+      # Feature Configuration
+      - FEATURE_CONVERSATION_SUMMARY=true
+      - FEATURE_DATASET_RETRIEVAL=true
+      - FEATURE_TOOLS=true
+      
+    volumes:
+      - ./volumes/app/storage:/app/storage
+      - ./volumes/app/logs:/app/logs
+    depends_on:
+      - cloud-sql-proxy
+    networks:
+      - dify-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Dify Web Frontend
+  web:
+    image: langgenius/dify-web:${DIFY_VERSION:-latest}
+    restart: always
+    environment:
+      - CONSOLE_API_URL=http://api:5001
+      - APP_API_URL=http://api:5001
+      - NEXT_PUBLIC_API_PREFIX=http://api:5001/console/api
+      - NEXT_PUBLIC_PUBLIC_API_PREFIX=http://api:5001/v1
+    networks:
+      - dify-network
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Dify Worker for background tasks
+  worker:
+    image: langgenius/dify-api:${DIFY_VERSION:-latest}
+    restart: always
+    environment:
+      - MODE=worker
+      - LOG_LEVEL=INFO
+      - DEBUG=false
+      - SECRET_KEY=${SECRET_KEY}
+      
+      # Database Configuration
+      - DB_USERNAME=${DB_USERNAME}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=cloud-sql-proxy
+      - DB_PORT=5432
+      - DB_DATABASE=${DB_DATABASE}
+      
+      # Redis Configuration
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      
+      # Celery Configuration
+      - CELERY_BROKER_URL=redis://${REDIS_HOST}:${REDIS_PORT:-6379}/${REDIS_DB:-0}
+      
+      # Storage Configuration
+      - STORAGE_TYPE=${STORAGE_TYPE}
+      - GOOGLE_STORAGE_BUCKET_NAME=${GOOGLE_STORAGE_BUCKET_NAME}
+      
+    volumes:
+      - ./volumes/app/storage:/app/storage
+      - ./volumes/app/logs:/app/logs
+    depends_on:
+      - cloud-sql-proxy
+      - api
+    networks:
+      - dify-network
+
+  # Google Cloud SQL Proxy
+  cloud-sql-proxy:
+    image: gcr.io/cloudsql-docker/gce-proxy:latest
+    restart: always
+    command: /cloud_sql_proxy -instances=${DB_CONNECTION_NAME}=tcp:0.0.0.0:5432
+    ports:
+      - "5432:5432"
+    networks:
+      - dify-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "5432"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./volumes/nginx/logs:/var/log/nginx
+      - ./volumes/certbot/conf:/etc/letsencrypt:ro
+      - ./volumes/certbot/www:/var/www/certbot:ro
+    depends_on:
+      - web
+      - api
+    networks:
+      - dify-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Certbot for SSL certificates
+  certbot:
+    image: certbot/certbot
+    restart: "no"
+    volumes:
+      - ./volumes/certbot/conf:/etc/letsencrypt
+      - ./volumes/certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - dify-network
+
+networks:
+  dify-network:
+    driver: bridge
+
+volumes:
+  app_storage:
+  app_logs:
+  nginx_logs:
+  certbot_conf:
+  certbot_www: 
