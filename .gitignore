@@ -70,3 +70,24 @@ docker-compose/volumes/
 # Temporary files
 tmp/
 temp/ 
+# Cleanup backup directories
+backup-*/
+
+# Additional files that might be generated
+*.pid
+*.sock
+*.sqlite
+*.db
+
+# Certificate files
+*.crt
+*.cert
+*.ca-bundle
+*.p7b
+*.p7s
+*.pfx
+
+# Deployment artifacts
+deploy-*.log
+install-*.log
+setup-*.log
