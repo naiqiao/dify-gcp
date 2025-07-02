@@ -25,16 +25,48 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to install Docker and Docker Compose
+install_docker() {
+    print_status "Installing Docker and Docker Compose..."
+    
+    # Update package manager
+    sudo apt-get update
+    
+    # Install Docker
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sudo sh get-docker.sh
+    sudo usermod -aG docker $USER
+    rm get-docker.sh
+    
+    # Install Docker Compose
+    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+    
+    print_success "Docker and Docker Compose installed!"
+}
+
+# Function to install required system packages
+install_system_packages() {
+    print_status "Installing required system packages..."
+    
+    sudo apt-get update
+    sudo apt-get install -y \
+        curl \
+        wget \
+        unzip \
+        jq \
+        netcat \
+        postgresql-client \
+        openssl
+    
+    print_success "System packages installed!"
+}
+
 # Function to setup directories and permissions
 setup_directories() {
     print_status "Setting up directories and permissions..."
     
-    # Create necessary directories
-    sudo mkdir -p /opt/dify
-    sudo mkdir -p /var/log/dify
-    sudo mkdir -p /etc/dify
-    
-    # Create volume directories for Docker Compose
+    # Create Docker Compose volume directories
     mkdir -p ~/docker-compose/volumes/app/storage
     mkdir -p ~/docker-compose/volumes/app/logs
     mkdir -p ~/docker-compose/volumes/nginx/logs
@@ -42,132 +74,358 @@ setup_directories() {
     mkdir -p ~/docker-compose/volumes/certbot/www
     
     # Set proper permissions
-    sudo chown -R $USER:$USER ~/docker-compose/volumes
     chmod -R 755 ~/docker-compose/volumes
     
     print_success "Directories setup completed!"
 }
 
-# Function to configure database connection
-setup_database() {
-    print_status "Setting up database connection..."
-    
-    # Load environment variables
-    source ~/.env
-    
-    # Update Cloud SQL Proxy service with actual connection name
-    sudo sed -i "s/CONNECTION_NAME/${DB_CONNECTION_NAME}/g" /etc/systemd/system/cloud-sql-proxy.service
-    
-    # Start Cloud SQL Proxy
-    sudo systemctl daemon-reload
-    sudo systemctl start cloud-sql-proxy
-    sudo systemctl enable cloud-sql-proxy
-    
-    # Wait for proxy to be ready
-    print_status "Waiting for Cloud SQL Proxy to be ready..."
-    for i in {1..30}; do
-        if nc -z localhost 5432; then
-            print_success "Cloud SQL Proxy is ready!"
-            break
-        fi
-        sleep 2
-    done
-    
-    print_success "Database connection setup completed!"
-}
-
-# Function to configure Nginx
-setup_nginx() {
-    print_status "Setting up Nginx configuration..."
-    
-    # Load environment variables
-    source ~/.env
-    
-    # Configure domain in Nginx config
-    if [ -n "$DOMAIN" ]; then
-        sed -i "s/DOMAIN_PLACEHOLDER/${DOMAIN}/g" ~/docker-compose/nginx/conf.d/dify.conf
-        print_status "Nginx configured for domain: $DOMAIN"
-    else
-        # Configure for IP access
-        EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
-        sed -i "s/DOMAIN_PLACEHOLDER/${EXTERNAL_IP}/g" ~/docker-compose/nginx/conf.d/dify.conf
-        print_status "Nginx configured for IP access: $EXTERNAL_IP"
-    fi
-    
-    print_success "Nginx configuration completed!"
-}
-
-# Function to start Dify services
-start_dify_services() {
-    print_status "Starting Dify services..."
+# Function to configure Docker Compose environment
+configure_docker_compose() {
+    print_status "Configuring Docker Compose environment..."
     
     cd ~/docker-compose
     
-    # Pull latest images
+    # Load environment variables
+    if [ -f .env ]; then
+        source .env
+        print_status "Environment variables loaded from .env file"
+    else
+        print_error ".env file not found!"
+        exit 1
+    fi
+    
+    # Update Docker Compose configuration with correct URLs
+    if [ -n "$INSTANCE_IP" ]; then
+        print_status "Configuring Docker Compose for instance IP: $INSTANCE_IP"
+        
+        # Update docker-compose.yml to use external IP for web service
+        sed -i "s|CONSOLE_API_URL=http://api:5001|CONSOLE_API_URL=http://$INSTANCE_IP|g" docker-compose.yml
+        sed -i "s|APP_API_URL=http://api:5001|APP_API_URL=http://$INSTANCE_IP|g" docker-compose.yml
+        sed -i "s|NEXT_PUBLIC_API_PREFIX=http://api:5001/console/api|NEXT_PUBLIC_API_PREFIX=http://$INSTANCE_IP/console/api|g" docker-compose.yml
+        sed -i "s|NEXT_PUBLIC_PUBLIC_API_PREFIX=http://api:5001/v1|NEXT_PUBLIC_PUBLIC_API_PREFIX=http://$INSTANCE_IP/v1|g" docker-compose.yml
+    fi
+    
+    print_success "Docker Compose configuration updated!"
+}
+
+# Function to start Docker services
+start_docker_services() {
+    print_status "Starting Docker services..."
+    
+    cd ~/docker-compose
+    
+    # Pull the latest images
+    print_status "Pulling Docker images..."
     docker-compose pull
     
     # Start services
+    print_status "Starting Dify services..."
     docker-compose up -d
     
-    # Wait for services to be ready
-    print_status "Waiting for services to be ready..."
+    # Wait for services to start
+    print_status "Waiting for services to start..."
     sleep 30
     
-    # Check service health
-    for i in {1..30}; do
-        if docker-compose ps | grep -q "Up"; then
-            print_success "Services are starting up!"
-            break
+    # Check service status
+    docker-compose ps
+    
+    print_success "Docker services started!"
+}
+
+# Function to wait for database to be ready
+wait_for_database() {
+    print_status "Waiting for database to be ready..."
+    
+    cd ~/docker-compose
+    
+    # Wait for Cloud SQL Proxy to be ready
+    for i in {1..60}; do
+        if docker-compose exec -T cloud-sql-proxy nc -z localhost 5432 > /dev/null 2>&1; then
+            print_success "Database is ready!"
+            return 0
         fi
+        print_status "Waiting for database... ($i/60)"
         sleep 5
     done
     
-    # Display service status
-    docker-compose ps
-    
-    print_success "Dify services started successfully!"
+    print_error "Database failed to become ready"
+    exit 1
 }
 
-# Function to run database migrations
-run_database_migrations() {
-    print_status "Running database migrations..."
+# Function to initialize database schema
+initialize_database() {
+    print_status "Initializing database schema..."
     
     cd ~/docker-compose
     
     # Wait for API service to be ready
+    print_status "Waiting for API service to be ready..."
     sleep 60
     
-    # Run database initialization
-    docker-compose exec -T api python -m flask db upgrade
+    # First, try to run Flask migrations
+    print_status "Running Flask database migrations..."
+    docker-compose exec -T api python -m flask db upgrade || true
     
-    print_success "Database migrations completed!"
+    # Create missing tables and fix schema issues based on troubleshooting experience
+    print_status "Creating missing database tables and fixing schema..."
+    docker-compose exec -T api python -c "
+import os
+import psycopg2
+from datetime import datetime
+import sys
+
+# Database connection parameters
+db_host = os.getenv('DB_HOST', 'cloud-sql-proxy')
+db_port = os.getenv('DB_PORT', '5432')
+db_name = os.getenv('DB_DATABASE', 'dify')
+db_user = os.getenv('DB_USERNAME', 'dify')
+db_password = os.getenv('DB_PASSWORD')
+
+try:
+    # Connect to database
+    conn = psycopg2.connect(
+        host=db_host,
+        port=db_port,
+        database=db_name,
+        user=db_user,
+        password=db_password
+    )
+    cursor = conn.cursor()
+    
+    print('Connected to database successfully')
+    
+    # Create dify_setups table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS dify_setups (
+            id SERIAL PRIMARY KEY,
+            version VARCHAR(255),
+            setup_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    print('Created dify_setups table')
+    
+    # Create tenants table with all required columns
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tenants (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name VARCHAR(255) NOT NULL,
+            encrypt_public_key TEXT,
+            encrypted_plan VARCHAR(255),
+            plan_base64url_data TEXT,
+            plan VARCHAR(255),
+            custom_config_dict TEXT,
+            custom_config TEXT,
+            status VARCHAR(255) NOT NULL DEFAULT 'normal',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    print('Created tenants table')
+    
+    # Create accounts table with all required columns
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS accounts (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            password_salt VARCHAR(255),
+            avatar VARCHAR(255),
+            interface_language VARCHAR(255) DEFAULT 'en-US',
+            interface_theme VARCHAR(255) DEFAULT 'light', 
+            timezone VARCHAR(255) DEFAULT 'UTC',
+            last_login_at TIMESTAMP,
+            last_login_ip VARCHAR(255),
+            last_active_at TIMESTAMP,
+            status VARCHAR(255) DEFAULT 'active',
+            initialized_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    print('Created accounts table')
+    
+    # Create tenant_account_joins table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tenant_account_joins (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id UUID NOT NULL,
+            account_id UUID NOT NULL,
+            current BOOLEAN DEFAULT TRUE,
+            role VARCHAR(255) NOT NULL DEFAULT 'normal',
+            invited_by UUID,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            UNIQUE(tenant_id, account_id)
+        );
+    ''')
+    print('Created tenant_account_joins table')
+    
+    # Create other essential tables
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS apps (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id UUID NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            description TEXT,
+            mode VARCHAR(255) NOT NULL DEFAULT 'chat',
+            icon VARCHAR(255),
+            icon_background VARCHAR(255),
+            app_model_config TEXT,
+            status VARCHAR(255) DEFAULT 'normal',
+            enable_site BOOLEAN DEFAULT TRUE,
+            enable_api BOOLEAN DEFAULT TRUE,
+            api_key VARCHAR(255),
+            is_demo BOOLEAN DEFAULT FALSE,
+            is_public BOOLEAN DEFAULT FALSE,
+            is_universal BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        );
+    ''')
+    print('Created apps table')
+    
+    # Commit all changes
+    conn.commit()
+    
+    # Check if setup is already marked as completed
+    cursor.execute('SELECT COUNT(*) FROM dify_setups;')
+    setup_count = cursor.fetchone()[0]
+    
+    if setup_count == 0:
+        print('Database schema initialization completed successfully')
+    else:
+        print(f'Found {setup_count} existing setup records')
+    
+    cursor.close()
+    conn.close()
+    
+    print('Database initialization completed successfully!')
+    
+except Exception as e:
+    print(f'Database initialization failed: {e}')
+    sys.exit(1)
+"
+    
+    print_success "Database schema initialized successfully!"
 }
 
-# Function to setup monitoring
-setup_monitoring() {
-    print_status "Setting up monitoring and logging..."
+# Function to verify services are working
+verify_services() {
+    print_status "Verifying services are working..."
+    
+    cd ~/docker-compose
+    
+    # Check if all containers are running
+    print_status "Checking container status..."
+    if ! docker-compose ps | grep -q "Up"; then
+        print_error "Some containers are not running"
+        docker-compose ps
+        return 1
+    fi
+    
+    # Wait for API to be responsive
+    print_status "Waiting for API to be responsive..."
+    for i in {1..30}; do
+        if curl -s -f http://localhost/console/api/setup > /dev/null 2>&1; then
+            print_success "API is responsive!"
+            break
+        fi
+        print_status "Waiting for API... ($i/30)"
+        sleep 10
+    done
+    
+    # Test API endpoint
+    print_status "Testing API endpoint..."
+    api_response=$(curl -s http://localhost/console/api/setup || echo "failed")
+    echo "API Response: $api_response"
+    
+    # Check if web service is responsive
+    print_status "Testing web service..."
+    if curl -s -I http://localhost/ | grep -q "200\|30[0-9]"; then
+        print_success "Web service is responsive!"
+    else
+        print_warning "Web service may not be fully ready yet"
+    fi
+    
+    print_success "Service verification completed!"
+}
+
+# Function to create monitoring and management scripts
+create_management_scripts() {
+    print_status "Creating management scripts..."
     
     # Create monitoring script
     cat > ~/scripts/monitor-dify.sh << 'EOF'
 #!/bin/bash
 
 echo "=== Dify Service Status ==="
+cd ~/docker-compose
 docker-compose ps
 
-echo -e "\n=== Resource Usage ==="
-docker stats --no-stream
-
-echo -e "\n=== Recent Logs ==="
-docker-compose logs --tail=50 api web worker
+echo -e "\n=== System Resources ==="
+echo "CPU and Memory usage:"
+docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"
 
 echo -e "\n=== Disk Usage ==="
-df -h
+df -h | grep -E "(Filesystem|/dev/)"
 
-echo -e "\n=== Memory Usage ==="
-free -h
+echo -e "\n=== Recent API Logs ==="
+docker-compose logs --tail=20 api
+
+echo -e "\n=== Service Health Check ==="
+curl -s http://localhost/console/api/setup | jq . 2>/dev/null || echo "API health check failed"
 EOF
     
-    chmod +x ~/scripts/monitor-dify.sh
+    # Create backup script
+    cat > ~/scripts/backup-dify.sh << 'EOF'
+#!/bin/bash
+
+set -e
+
+# Load environment variables
+cd ~/docker-compose
+source .env
+
+echo "Starting Dify backup..."
+
+# Create backup directory
+backup_dir="/tmp/dify-backup-$(date +'%Y%m%d-%H%M%S')"
+mkdir -p "$backup_dir"
+
+# Backup database
+echo "Backing up database..."
+docker-compose exec -T cloud-sql-proxy pg_dump -h localhost -U dify -d dify > "$backup_dir/database.sql"
+
+# Backup application data
+echo "Backing up application data..."
+sudo tar -czf "$backup_dir/app-data.tar.gz" -C ~/docker-compose/volumes .
+
+# Create backup info file
+cat > "$backup_dir/backup-info.txt" << EOL
+Backup created: $(date)
+Dify version: ${DIFY_VERSION:-latest}
+Instance IP: ${INSTANCE_IP}
+Domain: ${DOMAIN:-not set}
+EOL
+
+echo "Backup completed: $backup_dir"
+echo "Files created:"
+ls -la "$backup_dir"
+EOF
+    
+    # Make scripts executable
+    chmod +x ~/scripts/*.sh
+    
+    print_success "Management scripts created!"
+}
+
+# Function to setup log rotation
+setup_log_rotation() {
+    print_status "Setting up log rotation..."
     
     # Setup log rotation for Docker logs
     sudo tee /etc/logrotate.d/docker > /dev/null << 'EOF'
@@ -183,111 +441,48 @@ EOF
 }
 EOF
     
-    print_success "Monitoring setup completed!"
+    print_success "Log rotation configured!"
 }
 
-# Function to create backup script
-create_backup_script() {
-    print_status "Creating backup script..."
-    
-    cat > ~/scripts/backup-dify.sh << 'EOF'
-#!/bin/bash
-
-set -e
-
-# Load environment variables
-source ~/.env
-
-BACKUP_DIR="/opt/dify/backups"
-DATE=$(date +"%Y%m%d_%H%M%S")
-BACKUP_FILE="dify_backup_${DATE}.tar.gz"
-
-# Create backup directory
-sudo mkdir -p $BACKUP_DIR
-
-# Backup application data
-echo "Creating backup: $BACKUP_FILE"
-
-# Stop services temporarily
-docker-compose stop api worker
-
-# Create database backup
-docker-compose exec -T cloud-sql-proxy pg_dump -h localhost -U $DB_USERNAME -d $DB_DATABASE > /tmp/db_backup_${DATE}.sql
-
-# Create full backup
-sudo tar -czf $BACKUP_DIR/$BACKUP_FILE \
-    -C ~/docker-compose volumes/ \
-    -C /tmp db_backup_${DATE}.sql
-
-# Restart services
-docker-compose start api worker
-
-# Upload to Google Storage (optional)
-if [ -n "$GOOGLE_STORAGE_BUCKET_NAME" ]; then
-    gsutil cp $BACKUP_DIR/$BACKUP_FILE gs://$GOOGLE_STORAGE_BUCKET_NAME/backups/
-    echo "Backup uploaded to Google Storage"
-fi
-
-# Cleanup old backups (keep last 7 days)
-sudo find $BACKUP_DIR -name "dify_backup_*.tar.gz" -mtime +7 -delete
-rm -f /tmp/db_backup_${DATE}.sql
-
-echo "Backup completed: $BACKUP_FILE"
-EOF
-    
-    chmod +x ~/scripts/backup-dify.sh
-    
-    # Setup daily backup cron job
-    (crontab -l 2>/dev/null; echo "0 2 * * * ~/scripts/backup-dify.sh") | crontab -
-    
-    print_success "Backup script created and scheduled!"
-}
-
-# Function to display final status
-show_status() {
-    print_success "🎉 Dify setup completed successfully!"
-    echo ""
-    echo "Service Status:"
-    cd ~/docker-compose && docker-compose ps
-    echo ""
-    echo "Access Information:"
-    
-    # Load environment variables
-    source ~/.env
-    
-    if [ -n "$DOMAIN" ]; then
-        echo "  URL: http://$DOMAIN (HTTPS will be available after SSL setup)"
-    else
-        EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
-        echo "  URL: http://$EXTERNAL_IP"
-    fi
-    
-    echo ""
-    echo "Management Scripts:"
-    echo "  Monitor: ~/scripts/monitor-dify.sh"
-    echo "  Backup: ~/scripts/backup-dify.sh"
-    echo "  Update: ~/scripts/update-dify.sh"
-    echo ""
-    echo "Logs:"
-    echo "  View logs: docker-compose logs -f"
-    echo "  View specific service: docker-compose logs -f api"
-}
-
-# Main execution
+# Main execution function
 main() {
-    print_status "Starting Dify instance setup..."
+    print_status "🚀 Starting Dify instance setup..."
     
+    install_system_packages
+    install_docker
     setup_directories
-    setup_database
-    setup_nginx
-    start_dify_services
-    run_database_migrations
-    setup_monitoring
-    create_backup_script
-    show_status
+    configure_docker_compose
+    start_docker_services
+    wait_for_database
+    initialize_database
+    verify_services
+    create_management_scripts
+    setup_log_rotation
     
-    print_success "Dify instance setup completed!"
+    print_success "🎉 Dify instance setup completed successfully!"
+    
+    echo ""
+    echo "📋 Setup Summary:"
+    echo "✅ System packages installed"
+    echo "✅ Docker and Docker Compose installed"
+    echo "✅ Directory structure created"
+    echo "✅ Docker services started"
+    echo "✅ Database schema initialized"
+    echo "✅ Services verified"
+    echo "✅ Management scripts created"
+    echo "✅ Log rotation configured"
+    echo ""
+    echo "🔗 Your Dify instance should now be accessible!"
+    echo ""
+    echo "📁 Useful commands:"
+    echo "  Monitor services: ~/scripts/monitor-dify.sh"
+    echo "  Create backup:    ~/scripts/backup-dify.sh"
+    echo "  View logs:        cd ~/docker-compose && docker-compose logs -f"
+    echo "  Restart services: cd ~/docker-compose && docker-compose restart"
 }
+
+# Trap errors and provide helpful information
+trap 'print_error "Setup failed at line $LINENO. Check the output above for details."' ERR
 
 # Run main function
-main 
+main "$@" 

@@ -1,6 +1,22 @@
 version: '3.8'
 
 services:
+  # Google Cloud SQL Proxy
+  cloud-sql-proxy:
+    image: gcr.io/cloudsql-docker/gce-proxy:latest
+    restart: always
+    command: /cloud_sql_proxy -instances=${DB_CONNECTION_NAME}=tcp:0.0.0.0:5432
+    ports:
+      - "5432:5432"
+    networks:
+      - dify-network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5432 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
   # Dify API Backend
   api:
     image: langgenius/dify-api:${DIFY_VERSION:-latest}
@@ -34,8 +50,8 @@ services:
       # Web Configuration
       - WEB_API_CORS_ALLOW_ORIGINS=*
       - CONSOLE_CORS_ALLOW_ORIGINS=*
-      - CONSOLE_WEB_URL=https://${DOMAIN}
-      - WEB_API_URL=https://${DOMAIN}
+      - CONSOLE_WEB_URL=http://${INSTANCE_IP}
+      - WEB_API_URL=http://${INSTANCE_IP}
       
       # Mail Configuration (optional)
       - MAIL_TYPE=${MAIL_TYPE:-}
@@ -55,35 +71,16 @@ services:
       - ./volumes/app/storage:/app/storage
       - ./volumes/app/logs:/app/logs
     depends_on:
-      - cloud-sql-proxy
+      cloud-sql-proxy:
+        condition: service_healthy
     networks:
       - dify-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:5001/health || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
-
-  # Dify Web Frontend
-  web:
-    image: langgenius/dify-web:${DIFY_VERSION:-latest}
-    restart: always
-    environment:
-      - CONSOLE_API_URL=http://api:5001
-      - APP_API_URL=http://api:5001
-      - NEXT_PUBLIC_API_PREFIX=http://api:5001/console/api
-      - NEXT_PUBLIC_PUBLIC_API_PREFIX=http://api:5001/v1
-    networks:
-      - dify-network
-    depends_on:
-      - api
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 60s
 
   # Dify Worker for background tasks
   worker:
@@ -119,25 +116,33 @@ services:
       - ./volumes/app/storage:/app/storage
       - ./volumes/app/logs:/app/logs
     depends_on:
-      - cloud-sql-proxy
-      - api
+      cloud-sql-proxy:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     networks:
       - dify-network
 
-  # Google Cloud SQL Proxy
-  cloud-sql-proxy:
-    image: gcr.io/cloudsql-docker/gce-proxy:latest
+  # Dify Web Frontend
+  web:
+    image: langgenius/dify-web:${DIFY_VERSION:-latest}
     restart: always
-    command: /cloud_sql_proxy -instances=${DB_CONNECTION_NAME}=tcp:0.0.0.0:5432
-    ports:
-      - "5432:5432"
+    environment:
+      # Use external IP for API access to avoid internal network issues
+      - CONSOLE_API_URL=http://${INSTANCE_IP}
+      - APP_API_URL=http://${INSTANCE_IP}
+      - NEXT_PUBLIC_API_PREFIX=http://${INSTANCE_IP}/console/api
+      - NEXT_PUBLIC_PUBLIC_API_PREFIX=http://${INSTANCE_IP}/v1
     networks:
       - dify-network
+    depends_on:
+      api:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "5432"]
+      test: ["CMD-SHELL", "curl -f http://localhost:3000 || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
       start_period: 40s
 
   # Nginx Reverse Proxy
@@ -154,18 +159,20 @@ services:
       - ./volumes/certbot/conf:/etc/letsencrypt:ro
       - ./volumes/certbot/www:/var/www/certbot:ro
     depends_on:
-      - web
-      - api
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     networks:
       - dify-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost/health || wget -q --spider http://localhost/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
-  # Certbot for SSL certificates
+  # Certbot for SSL certificates (only if domain is set)
   certbot:
     image: certbot/certbot
     restart: "no"
@@ -175,14 +182,24 @@ services:
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
     networks:
       - dify-network
+    profiles:
+      - ssl
 
 networks:
   dify-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
 
 volumes:
   app_storage:
+    driver: local
   app_logs:
+    driver: local
   nginx_logs:
+    driver: local
   certbot_conf:
-  certbot_www: 
+    driver: local
+  certbot_www:
+    driver: local 
