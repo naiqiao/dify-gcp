@@ -23,7 +23,7 @@ provider "google" {
 resource "google_project_service" "required_apis" {
   for_each = toset([
     "compute.googleapis.com",
-    "cloudsql.googleapis.com", 
+    "sqladmin.googleapis.com", 
     "redis.googleapis.com",
     "storage.googleapis.com",
     "servicenetworking.googleapis.com",
@@ -178,10 +178,6 @@ resource "google_sql_database_instance" "dify_db" {
     ip_configuration {
       ipv4_enabled    = true
       private_network = google_compute_network.dify_network.id
-      authorized_networks {
-        name  = "dify-subnet"
-        value = google_compute_subnetwork.dify_subnet.ip_cidr_range
-      }
     }
   }
 

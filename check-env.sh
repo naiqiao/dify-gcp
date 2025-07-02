@@ -128,7 +128,11 @@ check_requirements() {
     
     echo ""
     
-    return $all_good
+    if [ "$all_good" = true ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Check GCP quotas and limits

@@ -55,7 +55,7 @@ collect_user_input() {
     echo "2) us-east1 (South Carolina, USA)"
     echo "3) us-west1 (Oregon, USA)"
     echo "4) europe-west1 (Belgium)"
-    echo "5) asia-east1 (Taiwan)"
+    echo "5) asia-southeast1 (Singapore)"
     echo "6) Custom region"
     
     while true; do
@@ -68,7 +68,7 @@ collect_user_input() {
             2) REGION="us-east1"; ZONE="us-east1-b"; break;;
             3) REGION="us-west1"; ZONE="us-west1-a"; break;;
             4) REGION="europe-west1"; ZONE="europe-west1-b"; break;;
-            5) REGION="asia-east1"; ZONE="asia-east1-a"; break;;
+            5) REGION="asia-southeast1"; ZONE="asia-southeast1-a"; break;;
             6) 
                 echo -n "Enter custom region: "
                 read REGION
